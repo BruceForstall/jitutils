@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.29004.164
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "mutate-test", "mutate-test.csproj", "{CF8BACA6-1CE6-4BD7-891C-8577839AC436}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{CF8BACA6-1CE6-4BD7-891C-8577839AC436}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CF8BACA6-1CE6-4BD7-891C-8577839AC436}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CF8BACA6-1CE6-4BD7-891C-8577839AC436}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CF8BACA6-1CE6-4BD7-891C-8577839AC436}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {8AD20865-087C-4772-B2D5-E13BDAC3BB1D}
+	EndGlobalSection
+EndGlobal
