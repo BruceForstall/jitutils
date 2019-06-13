@@ -3,14 +3,10 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
 using System;
-using System.Collections.Specialized;
 using System.CommandLine;
 using System.CommandLine.Invocation;
-using System.ComponentModel;
 using System.IO;
-using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 
 // TODO: 
 // Use workspaces and parse csproj instead?
@@ -28,6 +24,12 @@ namespace MutateTest
         public bool StructStress { get; set; }
         public bool ShowResults { get; set; }
     }
+
+    public class MutateTestException : Exception
+    {
+
+    }
+
     class Program
     {
         private static readonly CSharpCompilationOptions DebugOptions =
@@ -106,8 +108,8 @@ namespace MutateTest
                 Console.WriteLine();
                 Console.WriteLine("---------------------------------------");
                 Console.WriteLine("// EH Stress");
-                EHStressor eh = new EHStressor();
-                SyntaxNode newRoot = eh.Visit(inputTree.GetRoot());
+                WrapBlocksInTryCatch stressor = new WrapBlocksInTryCatch();
+                SyntaxNode newRoot = stressor.Visit(inputTree.GetRoot());
 
                 if (options.ShowResults)
                 {
@@ -116,7 +118,12 @@ namespace MutateTest
 
                 SyntaxTree newTree = SyntaxTree(newRoot, ParseOptions);
 
-                int stressReslt = CompileAndExecute(newTree, "EH Stress");
+                int stressResult = CompileAndExecute(newTree, "EH Stress");
+
+                if (stressResult != 100)
+                {
+                    return stressResult;
+                }
             }
  
             return 100;
@@ -124,6 +131,12 @@ namespace MutateTest
 
         static int CompileAndExecute(SyntaxTree inputTree, string name)
         {
+            //Console.WriteLine($"Compiling {name} with assembly references:");
+            //foreach (var reference in References)
+            //{
+            //    Console.WriteLine($"{reference.Display}");
+            //}
+
             SyntaxTree[] inputTrees = { inputTree };
             CSharpCompilation compilation = CSharpCompilation.Create("InputProgram", inputTrees, References, ReleaseOptions);
 
@@ -147,6 +160,7 @@ namespace MutateTest
                     {
                         Console.WriteLine(d);
                     }
+                    return -1;
                 }
 
                 Console.WriteLine($"// Compiled '{name}' successfully");
@@ -179,19 +193,18 @@ namespace MutateTest
     }
 
     // Rewrite any top-level block that is not enclosed in a try
-    // as a try { } catch (Exception) { throw; }
+    // as a try { <block> } catch (MutateTest.MutateTestException) { throw; }
     //
     // TODO: bottom-up rewrite?
     //
     // See http://roslynquoter.azurewebsites.net/ for tool that shows how use roslyn APIs for C# syntax.
 
-    public class EHStressor : CSharpSyntaxRewriter
+    public class WrapBlocksInTryCatch : CSharpSyntaxRewriter
     {
         public override SyntaxNode VisitBlock(BlockSyntax node)
         {
             if (IsInTryBlock(node)) return base.VisitBlock(node);
 
-            var blockSpan = node.Span;
             var lineSpan = node.GetLocation().GetMappedLineSpan();
             Console.WriteLine($"// Adding try block around lines {lineSpan.StartLinePosition.Line}-{lineSpan.EndLinePosition.Line}");
 
@@ -202,7 +215,9 @@ namespace MutateTest
                                     CatchClause()
                                     .WithDeclaration(
                                         CatchDeclaration(
-                                            IdentifierName("Exception")))
+                                            QualifiedName(
+                                                IdentifierName("MutateTest"),
+                                                IdentifierName("MutateTestException"))))
                                     .WithBlock(
                                         Block(
                                             SingletonList<StatementSyntax>(
