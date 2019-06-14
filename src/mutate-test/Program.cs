@@ -6,12 +6,17 @@ using System;
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
+using System.Xml;
 
 // TODO: 
 // Use workspaces and parse csproj instead?
 // Fix formatting after we mess with code.
 // Try random stuff from https://github.com/dotnet/roslyn-sdk/tree/master/samples/CSharp/TreeTransforms
+// See http://roslynquoter.azurewebsites.net/ for tool that shows how use roslyn APIs for C# syntax.
+// Useful if you can express what you want in C# and need to see how to get a transform to create it for you.
 
 using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
 
@@ -105,28 +110,57 @@ namespace MutateTest
             // Ok, we have a compile and runnable test case. Now, mess with it....
             if (options.EhStress)
             {
-                Console.WriteLine();
-                Console.WriteLine("---------------------------------------");
-                Console.WriteLine("// EH Stress");
-                WrapBlocksInTryCatch stressor = new WrapBlocksInTryCatch();
-                SyntaxNode newRoot = stressor.Visit(inputTree.GetRoot());
+                EHMutator tryCatch = new WrapBlocksInTryCatch();
+                EHMutator tryCatchx2 = new RepeatMutator(tryCatch, 2);
+                EHMutator tryEmptyFinally = new WrapBlocksInTryEmptyFinally();
+                EHMutator tryEmtpyFinallyx2 = new RepeatMutator(tryEmptyFinally, 2);
+                EHMutator emptyTryFinally = new WrapBlocksInEmptyTryFinally();
+                EHMutator emptyTryFinallyx2 = new RepeatMutator(emptyTryFinally, 2);
+                EHMutator combo1 = new ComboMutator(tryEmptyFinally, tryCatch);
+                EHMutator combo2 = new ComboMutator(emptyTryFinally, tryCatch);
+                EHMutator combo3 = new ComboMutator(emptyTryFinally, tryEmptyFinally);
+                EHMutator combo4 = new ComboMutator(combo1, combo2);
+                EHMutator combo1x2 = new RepeatMutator(combo1, 2);
+                EHMutator combo4x2 = new RepeatMutator(combo4, 2);
 
-                if (options.ShowResults)
+                EHMutator[] stressors = new EHMutator[] {
+                    tryCatch, tryCatchx2,
+                    tryEmptyFinally, tryEmtpyFinallyx2,
+                    emptyTryFinally, emptyTryFinallyx2,
+                    combo1, combo2, combo3, combo4,
+                    combo1x2, combo4x2 };
+
+                foreach (var stressor in stressors)
                 {
-                    Console.WriteLine(newRoot.ToFullString());
-                }
+                    int stressResult = ApplyStress(stressor, inputTree, options);
 
-                SyntaxTree newTree = SyntaxTree(newRoot, ParseOptions);
-
-                int stressResult = CompileAndExecute(newTree, "EH Stress");
-
-                if (stressResult != 100)
-                {
-                    return stressResult;
+                    if (stressResult != 100)
+                    {
+                        return stressResult;
+                    }
                 }
             }
- 
+
             return 100;
+        }
+
+        static int ApplyStress(EHMutator m, SyntaxTree tree, Options options)
+        {
+            Console.WriteLine();
+            Console.WriteLine("---------------------------------------");
+            Console.WriteLine($"// EH Stress: {m.Name}");
+            SyntaxNode newRoot = m.Mutate(tree.GetRoot());
+
+            if (options.ShowResults)
+            {
+                Console.WriteLine(newRoot.ToFullString());
+            }
+
+            SyntaxTree newTree = SyntaxTree(newRoot, ParseOptions);
+
+            int stressResult = CompileAndExecute(newTree, $"EH Stress: {m.Name}");
+
+            return stressResult;
         }
 
         static int CompileAndExecute(SyntaxTree inputTree, string name)
@@ -192,44 +226,31 @@ namespace MutateTest
         }
     }
 
-    // Rewrite any top-level block that is not enclosed in a try
-    // as a try { <block> } catch (MutateTest.MutateTestException) { throw; }
+    // Base class for EH Mutations
     //
-    // TODO: bottom-up rewrite?
+    // EH Mutations add "semantic preserving" EH constructs to
+    // methods. This can be useful for stress testing the EH
+    // handling in the jit, or for getting an estimate of the
+    // perf impact of having EH constructs in code.
     //
-    // See http://roslynquoter.azurewebsites.net/ for tool that shows how use roslyn APIs for C# syntax.
-
-    public class WrapBlocksInTryCatch : CSharpSyntaxRewriter
+    // TODO: 
+    //   bottom-up rewriting?
+    //   apply to all blocks or more blocks
+    //   split up statements within a block
+    //   mix stress transforms randomly; iterate on them
+    public abstract class EHMutator : CSharpSyntaxRewriter
     {
-        public override SyntaxNode VisitBlock(BlockSyntax node)
+        public abstract string Name { get; }
+
+        protected void Announce(SyntaxNode node)
         {
-            if (IsInTryBlock(node)) return base.VisitBlock(node);
-
             var lineSpan = node.GetLocation().GetMappedLineSpan();
-            Console.WriteLine($"// Adding try block around lines {lineSpan.StartLinePosition.Line}-{lineSpan.EndLinePosition.Line}");
-
-            var newNode = Block(
-                        SingletonList<StatementSyntax>(
-                            TryStatement(
-                                SingletonList<CatchClauseSyntax>(
-                                    CatchClause()
-                                    .WithDeclaration(
-                                        CatchDeclaration(
-                                            QualifiedName(
-                                                IdentifierName("MutateTest"),
-                                                IdentifierName("MutateTestException"))))
-                                    .WithBlock(
-                                        Block(
-                                            SingletonList<StatementSyntax>(
-                                                ThrowStatement())))))
-                            .WithBlock(node)))
-                .NormalizeWhitespace();
-            return newNode;
+            Console.WriteLine($"// Adding {Name} around lines {lineSpan.StartLinePosition.Line}-{lineSpan.EndLinePosition.Line}");
         }
 
-        private static bool IsInTryBlock(SyntaxNode initialNode)
+        protected static bool IsInTryBlock(SyntaxNode baseNode)
         {
-            SyntaxNode node = initialNode.Parent;
+            SyntaxNode node = baseNode.Parent;
             while (node != null)
             {
                 switch (node.Kind())
@@ -270,6 +291,153 @@ namespace MutateTest
             }
 
             return false;
+        }
+
+        // More generally, things that can't be in finallys
+        protected static bool ContainsReturnOrThrow(SyntaxNode node)
+        {
+            return node.DescendantNodes(descendIntoTrivia: false).
+                Any(x =>
+                    (x.Kind() == SyntaxKind.ReturnStatement) ||
+                     x.Kind() == SyntaxKind.ThrowStatement);
+        }
+
+        public virtual SyntaxNode Mutate(SyntaxNode node)
+        {
+            return Visit(node);
+        }
+    }
+
+    // Rewrite any top-level block that is not enclosed in a try
+    // as a try { <block> } catch (MutateTest.MutateTestException) { throw; }
+    public class WrapBlocksInTryCatch : EHMutator
+    {
+        public override string Name => "TryCatch";
+
+        public override SyntaxNode VisitBlock(BlockSyntax node)
+        {
+            Announce(node);
+
+            var newNode = Block(
+                        SingletonList<StatementSyntax>(
+                            TryStatement(
+                                SingletonList<CatchClauseSyntax>(
+                                    CatchClause()
+                                    .WithDeclaration(
+                                        CatchDeclaration(
+                                            QualifiedName(
+                                                IdentifierName("MutateTest"),
+                                                IdentifierName("MutateTestException"))))
+                                    .WithBlock(
+                                        Block(
+                                            SingletonList<StatementSyntax>(
+                                                ThrowStatement())))))
+                            .WithBlock(node)))
+                .NormalizeWhitespace();
+            return newNode;
+        }
+    }
+
+    // Rewrite any top-level block that is not enclosed in a try
+    // as a try { } finally { <block> }
+    public class WrapBlocksInEmptyTryFinally : EHMutator
+    {
+        public override string Name => "EmptyTryFinally";
+
+        public override SyntaxNode VisitBlock(BlockSyntax node)
+        {
+            if (ContainsReturnOrThrow(node)) return base.VisitBlock(node);
+
+            Announce(node);
+
+            var newNode = Block(
+                            SingletonList<StatementSyntax>(
+                                TryStatement()
+                                    .WithFinally(
+                                        FinallyClause(node))))
+                            .NormalizeWhitespace();
+            return newNode;
+        }
+    }
+
+    // Rewrite any top-level block that is not enclosed in a try
+    // as a try { <block> } finally { }
+    public class WrapBlocksInTryEmptyFinally : EHMutator
+    {
+        public override string Name => "TryEmptyFinally";
+
+
+        public override SyntaxNode VisitBlock(BlockSyntax node)
+        {
+            Announce(node);
+
+            var newNode = Block(
+                            SingletonList<StatementSyntax>(
+                                TryStatement()
+                                .WithBlock(node)
+                                .WithFinally(FinallyClause(Block()))))
+                            .NormalizeWhitespace();
+            return newNode;
+        }
+    }
+
+    // Rewrite any top-level block into a 
+    // try { throw MutateTestException; } catch (MutateTestException) { <block> }
+    public class MoveBlocksIntoCatchClauses : EHMutator
+    {
+        public override string Name => "IntoCatch";
+    }
+
+    // Rewrite any top-level block into a 
+    // try { throw MutateTestException; } filter (1) filter-handler  { <block> } catch { }
+    public class MoveBlocksIntoFilterClauses : EHMutator
+    {
+        public override string Name => "IntoFilter";
+    }
+
+    // Apply two mutators in sequence
+    public class ComboMutator : EHMutator
+    {
+        readonly EHMutator _m1;
+        readonly EHMutator _m2;
+
+        public ComboMutator(EHMutator m1, EHMutator m2)
+        {
+            _m1 = m1;
+            _m2 = m2;
+        }
+
+        public override string Name => _m1.Name + " then " + _m2.Name;
+
+        public override SyntaxNode Mutate(SyntaxNode node)
+        {
+            return _m2.Mutate(_m1.Mutate(node));
+        }
+    }
+
+    // Repeatedly apply a mutator
+    public class RepeatMutator : EHMutator
+    {
+        readonly EHMutator _m;
+        readonly int _n;
+        public RepeatMutator(EHMutator m, int n)
+        {
+            _m = m;
+            _n = n;
+        }
+
+        public override string Name => _m.Name + " repeated " + _n + " times";
+
+        public override SyntaxNode Mutate(SyntaxNode node)
+        {
+            SyntaxNode result = node;
+
+            for (int i = 0; i < _n; i++)
+            {
+                result = _m.Mutate(result);
+            }
+
+            return result;
         }
     }
 }
