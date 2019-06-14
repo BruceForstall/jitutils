@@ -5,6 +5,7 @@ using Microsoft.CodeAnalysis.Emit;
 using System;
 using System.CommandLine;
 using System.CommandLine.Invocation;
+using System.Data;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -110,29 +111,54 @@ namespace MutateTest
             // Ok, we have a compile and runnable test case. Now, mess with it....
             if (options.EhStress)
             {
+                // Singleton stressors
                 EHMutator tryCatch = new WrapBlocksInTryCatch();
-                EHMutator tryCatchx2 = new RepeatMutator(tryCatch, 2);
                 EHMutator tryEmptyFinally = new WrapBlocksInTryEmptyFinally();
-                EHMutator tryEmtpyFinallyx2 = new RepeatMutator(tryEmptyFinally, 2);
                 EHMutator emptyTryFinally = new WrapBlocksInEmptyTryFinally();
+                EHMutator moveToCatch = new MoveBlocksIntoCatchClauses();
+
+                // Repeated stressors
+                EHMutator tryCatchx2 = new RepeatMutator(tryCatch, 2);
+                EHMutator tryEmtpyFinallyx2 = new RepeatMutator(tryEmptyFinally, 2);
                 EHMutator emptyTryFinallyx2 = new RepeatMutator(emptyTryFinally, 2);
+                EHMutator moveToCatchx2 = new RepeatMutator(moveToCatch, 2);
+
+                // Combination stressors
                 EHMutator combo1 = new ComboMutator(tryEmptyFinally, tryCatch);
                 EHMutator combo2 = new ComboMutator(emptyTryFinally, tryCatch);
                 EHMutator combo3 = new ComboMutator(emptyTryFinally, tryEmptyFinally);
-                EHMutator combo4 = new ComboMutator(combo1, combo2);
+                EHMutator combo4 = new ComboMutator(moveToCatch, tryEmptyFinally);
+
+                // Combos of combos
+                EHMutator combo12 = new ComboMutator(combo1, combo2);
+                EHMutator combo34 = new ComboMutator(combo3, combo4);
+                EHMutator combo1234 = new ComboMutator(combo12, combo34);
+                EHMutator combo3412 = new ComboMutator(combo34, combo12);
+
+                // Repeats of Combos
                 EHMutator combo1x2 = new RepeatMutator(combo1, 2);
                 EHMutator combo4x2 = new RepeatMutator(combo4, 2);
+                EHMutator combo1234x2 = new RepeatMutator(combo1234, 2);
+
+                // More
+                EHMutator complex1 = new ComboMutator(combo1x2, combo4x2);
+                EHMutator complex2 = new RepeatMutator(complex1, 2);
 
                 EHMutator[] stressors = new EHMutator[] {
                     tryCatch, tryCatchx2,
                     tryEmptyFinally, tryEmtpyFinallyx2,
                     emptyTryFinally, emptyTryFinallyx2,
+                    moveToCatch, moveToCatchx2,
                     combo1, combo2, combo3, combo4,
-                    combo1x2, combo4x2 };
+                    combo12, combo34, combo1234, combo3412,
+                    combo1x2, combo4x2, combo1234x2,
+                    complex1, complex2};
+
+                int variantNumber = 0;
 
                 foreach (var stressor in stressors)
                 {
-                    int stressResult = ApplyStress(stressor, inputTree, options);
+                    int stressResult = ApplyStress(variantNumber++, stressor, inputTree, options);
 
                     if (stressResult != 100)
                     {
@@ -144,11 +170,12 @@ namespace MutateTest
             return 100;
         }
 
-        static int ApplyStress(EHMutator m, SyntaxTree tree, Options options)
+        static int ApplyStress(int variantNumber, EHMutator m, SyntaxTree tree, Options options)
         {
+            string title = $"// EH Stress [{variantNumber}]: {m.Name}";
             Console.WriteLine();
             Console.WriteLine("---------------------------------------");
-            Console.WriteLine($"// EH Stress: {m.Name}");
+            Console.WriteLine(title);
             SyntaxNode newRoot = m.Mutate(tree.GetRoot());
 
             if (options.ShowResults)
@@ -158,7 +185,7 @@ namespace MutateTest
 
             SyntaxTree newTree = SyntaxTree(newRoot, ParseOptions);
 
-            int stressResult = CompileAndExecute(newTree, $"EH Stress: {m.Name}");
+            int stressResult = CompileAndExecute(newTree, title);
 
             return stressResult;
         }
@@ -386,6 +413,36 @@ namespace MutateTest
     public class MoveBlocksIntoCatchClauses : EHMutator
     {
         public override string Name => "IntoCatch";
+
+        public override SyntaxNode VisitBlock(BlockSyntax node)
+        {
+            Announce(node);
+
+            var newNode = Block(
+                        SingletonList<StatementSyntax>(
+                            TryStatement(
+                                SingletonList<CatchClauseSyntax>(
+                                    CatchClause()
+                                    .WithDeclaration(
+                                        CatchDeclaration(
+                                            QualifiedName(
+                                                IdentifierName("MutateTest"),
+                                                IdentifierName("MutateTestException"))))
+                                    .WithBlock(node)))
+                               .WithBlock(
+                                   Block(
+                                            SingletonList<StatementSyntax>(
+                                                ThrowStatement(
+                                                    ObjectCreationExpression(
+                                                         QualifiedName(
+                                                            IdentifierName("MutateTest"),
+                                                            IdentifierName("MutateTestException")))
+                                                    .WithArgumentList(
+                                                     ArgumentList())))))))
+                            .NormalizeWhitespace();
+
+            return newNode;
+        }
     }
 
     // Rewrite any top-level block into a 
@@ -426,7 +483,7 @@ namespace MutateTest
             _n = n;
         }
 
-        public override string Name => _m.Name + " repeated " + _n + " times";
+        public override string Name => "(" + _m.Name + ") repeated " + _n + " times";
 
         public override SyntaxNode Mutate(SyntaxNode node)
         {
