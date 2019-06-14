@@ -29,6 +29,7 @@ namespace MutateTest
         public bool EhStress { get; set; }
         public bool StructStress { get; set; }
         public bool ShowResults { get; set; }
+        public static bool Verbose { get; set; }
     }
 
     public class MutateTestException : Exception
@@ -39,10 +40,10 @@ namespace MutateTest
     class Program
     {
         private static readonly CSharpCompilationOptions DebugOptions =
-            new CSharpCompilationOptions(OutputKind.ConsoleApplication, concurrentBuild: false, optimizationLevel: OptimizationLevel.Debug);
+            new CSharpCompilationOptions(OutputKind.ConsoleApplication, concurrentBuild: false, optimizationLevel: OptimizationLevel.Debug).WithAllowUnsafe(true);
 
         private static readonly CSharpCompilationOptions ReleaseOptions =
-            new CSharpCompilationOptions(OutputKind.ConsoleApplication, concurrentBuild: false, optimizationLevel: OptimizationLevel.Release);
+            new CSharpCompilationOptions(OutputKind.ConsoleApplication, concurrentBuild: false, optimizationLevel: OptimizationLevel.Release).WithAllowUnsafe(true);
 
         private static readonly CSharpParseOptions ParseOptions = new CSharpParseOptions(LanguageVersion.Latest);
 
@@ -75,6 +76,9 @@ namespace MutateTest
 
             Option showResultsOption = new Option("--showResults", "print modified programs to stdout", new Argument<bool>());
             rootCommand.AddOption(showResultsOption);
+
+            Option verboseOption = new Option("--verbose", "describe each transformation", new Argument<bool>());
+            rootCommand.AddOption(verboseOption);
 
             rootCommand.Handler = CommandHandler.Create<Options>((options) =>
             {
@@ -139,10 +143,12 @@ namespace MutateTest
                 EHMutator combo1x2 = new RepeatMutator(combo1, 2);
                 EHMutator combo4x2 = new RepeatMutator(combo4, 2);
                 EHMutator combo1234x2 = new RepeatMutator(combo1234, 2);
+                EHMutator combo3412x2 = new RepeatMutator(combo3412, 2);
 
                 // More
                 EHMutator complex1 = new ComboMutator(combo1x2, combo4x2);
                 EHMutator complex2 = new RepeatMutator(complex1, 2);
+                EHMutator complex3 = new ComboMutator(combo1234x2, combo3412x2);
 
                 EHMutator[] stressors = new EHMutator[] {
                     tryCatch, tryCatchx2,
@@ -151,8 +157,9 @@ namespace MutateTest
                     moveToCatch, moveToCatchx2,
                     combo1, combo2, combo3, combo4,
                     combo12, combo34, combo1234, combo3412,
-                    combo1x2, combo4x2, combo1234x2,
-                    complex1, complex2};
+                    combo1x2, combo4x2, combo1234x2, combo3412x2,
+                    complex1, complex2, complex3
+                };
 
                 int variantNumber = 0;
 
@@ -172,7 +179,8 @@ namespace MutateTest
 
         static int ApplyStress(int variantNumber, EHMutator m, SyntaxTree tree, Options options)
         {
-            string title = $"// EH Stress [{variantNumber}]: {m.Name}";
+            string shortTitle = $"EH Stress [{variantNumber}]";
+            string title = $"// {shortTitle}: {m.Name}";
             Console.WriteLine();
             Console.WriteLine("---------------------------------------");
             Console.WriteLine(title);
@@ -185,7 +193,7 @@ namespace MutateTest
 
             SyntaxTree newTree = SyntaxTree(newRoot, ParseOptions);
 
-            int stressResult = CompileAndExecute(newTree, title);
+            int stressResult = CompileAndExecute(newTree, shortTitle);
 
             return stressResult;
         }
@@ -271,8 +279,11 @@ namespace MutateTest
 
         protected void Announce(SyntaxNode node)
         {
-            var lineSpan = node.GetLocation().GetMappedLineSpan();
-            Console.WriteLine($"// Adding {Name} around lines {lineSpan.StartLinePosition.Line}-{lineSpan.EndLinePosition.Line}");
+            if (Options.Verbose)
+            {
+                var lineSpan = node.GetLocation().GetMappedLineSpan();
+                Console.WriteLine($"// Adding {Name} around lines {lineSpan.StartLinePosition.Line}-{lineSpan.EndLinePosition.Line}");
+            }
         }
 
         protected static bool IsInTryBlock(SyntaxNode baseNode)
