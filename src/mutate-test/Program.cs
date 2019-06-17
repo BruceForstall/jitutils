@@ -13,23 +13,30 @@ using System.Reflection.Emit;
 using System.Xml;
 
 // TODO: 
-// Use workspaces and parse csproj instead?
-// Fix formatting after we mess with code.
-// Try random stuff from https://github.com/dotnet/roslyn-sdk/tree/master/samples/CSharp/TreeTransforms
+// * Use workspaces and parse csproj instead?
+// * Fix formatting after we mess with code.
+// * Try random stuff from https://github.com/dotnet/roslyn-sdk/tree/master/samples/CSharp/TreeTransforms
+// * Rethink how TransformationCount is computed
+//
 // See http://roslynquoter.azurewebsites.net/ for tool that shows how use roslyn APIs for C# syntax.
 // Useful if you can express what you want in C# and need to see how to get a transform to create it for you.
 
 using static Microsoft.CodeAnalysis.CSharp.SyntaxFactory;
+using static MutateTest.OptionHolder;
 
 namespace MutateTest
 {
-    class Options
+    class OptionHolder
     {
         public string InputFile { get; set; }
         public bool EhStress { get; set; }
         public bool StructStress { get; set; }
         public bool ShowResults { get; set; }
-        public static bool Verbose { get; set; }
+        public bool Recursive { get; set; }
+        public bool Verbose { get; set; }
+        public int Seed { get; set; }
+
+        public static OptionHolder Options { get; set; }
     }
 
     public class MutateTestException : Exception
@@ -48,7 +55,7 @@ namespace MutateTest
         private static readonly CSharpParseOptions ParseOptions = new CSharpParseOptions(LanguageVersion.Latest);
 
         private static readonly MetadataReference[] References =
-{
+        {
             MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
             MetadataReference.CreateFromFile(Assembly.GetExecutingAssembly().Location),
             MetadataReference.CreateFromFile(typeof(Console).Assembly.Location),
@@ -64,8 +71,8 @@ namespace MutateTest
             rootCommand.Description = "Take an existing test case and produce new test cases via mutation";
 
             Argument inputFile = new Argument<string>();
-            inputFile.Name = "inputFile";
-            inputFile.Description = "Input test case file";
+            inputFile.Name = "InputFile";
+            inputFile.Description = "Input test case file or directory (for --recursive)";
             rootCommand.AddArgument(inputFile);
 
             Option ehStressOption = new Option("--ehStress", "add EH to methods", new Argument<bool>());
@@ -80,40 +87,102 @@ namespace MutateTest
             Option verboseOption = new Option("--verbose", "describe each transformation", new Argument<bool>());
             rootCommand.AddOption(verboseOption);
 
-            rootCommand.Handler = CommandHandler.Create<Options>((options) =>
+            Option recursiveOption = new Option("--recursive", "process each file recursively", new Argument<bool>());
+            rootCommand.AddOption(recursiveOption);
+
+            Option seedOption = new Option("--seed", "random seed", new Argument<int>(42));
+            rootCommand.AddOption(seedOption);
+
+            rootCommand.Handler = CommandHandler.Create<OptionHolder>((options) =>
             {
-                return InnerMain(options);
+                Options = options;
+                return InnerMain();
             });
 
             return rootCommand.InvokeAsync(args).Result;
         }
 
-        static int InnerMain(Options options)
+        static int InnerMain()
+        {
+            if (Options.Recursive)
+            {
+                Console.WriteLine("** Directory Mode **");
+
+                //if (!Directory.Exists(options.InputFile))
+                //{
+                //    Console.WriteLine($"Can't access directory '{options.InputFile}'");
+                //    return -1;
+                //}
+
+                var inputFiles = Directory.EnumerateFiles(Options.InputFile, "*", SearchOption.AllDirectories)
+                                    .Where(s => (s.EndsWith(".cs")));
+
+                int total = 0;
+                int failed = 0;
+                int succeeded = 0;
+
+                foreach (var subInputFile in inputFiles)
+                {
+                    total++;
+
+                    int result = MutateOneTest(subInputFile);
+
+                    if (result == 100)
+                    {
+                        succeeded++;
+                    }
+                    else
+                    {
+                        failed++;
+                    }
+                }
+
+                Console.WriteLine($"Final Results: {total} files, {succeeded} succeeded, {failed} failed");
+
+                if (failed == 0)
+                {
+                    return 100;
+                }
+                else
+                {
+                    return -1;
+                }
+            }
+            else
+            {
+                int result = MutateOneTest(Options.InputFile);
+                return result;
+            }
+        }
+
+        static int MutateOneTest(string testFile)
         {
             Console.WriteLine("---------------------------------------");
             Console.WriteLine("// Original Program");
 
             // Access input and build parse tree
-            if (!File.Exists(options.InputFile))
+            if (!File.Exists(testFile))
             {
-                Console.WriteLine($"Can't access '{options.InputFile}'");
+                Console.WriteLine($"Can't access '{testFile}'");
                 return -1;
             }
 
-            string inputText = File.ReadAllText(options.InputFile);
+            string inputText = File.ReadAllText(testFile);
             SyntaxTree inputTree = CSharpSyntaxTree.ParseText(inputText,
-                    path: options.InputFile,
+                    path: testFile,
                     options: ParseOptions);
 
-            int inputResult = CompileAndExecute(inputTree, options.InputFile);
+            int inputResult = CompileAndExecute(inputTree, testFile);
 
             if (inputResult != 100)
             {
                 return inputResult;
             }
 
+            Random random = new Random(Options.Seed);
+
             // Ok, we have a compile and runnable test case. Now, mess with it....
-            if (options.EhStress)
+            if (Options.EhStress)
             {
                 // Singleton stressors
                 EHMutator tryCatch = new WrapBlocksInTryCatch();
@@ -126,6 +195,16 @@ namespace MutateTest
                 EHMutator tryEmtpyFinallyx2 = new RepeatMutator(tryEmptyFinally, 2);
                 EHMutator emptyTryFinallyx2 = new RepeatMutator(emptyTryFinally, 2);
                 EHMutator moveToCatchx2 = new RepeatMutator(moveToCatch, 2);
+
+                // Random stressors
+                EHMutator tryCatchRandom = new RandomMutator(tryCatch, random, 0.25);
+                EHMutator tryEmtpyFinallyRandom = new RandomMutator(tryEmptyFinally, random, 0.25);
+                EHMutator emptyTryFinallyRandom = new RandomMutator(emptyTryFinally, random, 0.25);
+                EHMutator moveToCatchRandom = new RandomMutator(moveToCatch, random, 0.25);
+
+                // Alternative stressors
+                EHMutator either12 = new RandomChoiceMutator(tryCatch, tryEmptyFinally, random, 0.5);
+                EHMutator either34 = new RandomChoiceMutator(moveToCatch, tryEmptyFinally, random, 0.5);
 
                 // Combination stressors
                 EHMutator combo1 = new ComboMutator(tryEmptyFinally, tryCatch);
@@ -155,6 +234,8 @@ namespace MutateTest
                     tryEmptyFinally, tryEmtpyFinallyx2,
                     emptyTryFinally, emptyTryFinallyx2,
                     moveToCatch, moveToCatchx2,
+                    tryCatchRandom, tryEmtpyFinallyRandom, emptyTryFinallyRandom, moveToCatchRandom,
+                    either12, either34,
                     combo1, combo2, combo3, combo4,
                     combo12, combo34, combo1234, combo3412,
                     combo1x2, combo4x2, combo1234x2, combo3412x2,
@@ -165,7 +246,7 @@ namespace MutateTest
 
                 foreach (var stressor in stressors)
                 {
-                    int stressResult = ApplyStress(variantNumber++, stressor, inputTree, options);
+                    int stressResult = ApplyStress(variantNumber++, stressor, inputTree);
 
                     if (stressResult != 100)
                     {
@@ -177,7 +258,7 @@ namespace MutateTest
             return 100;
         }
 
-        static int ApplyStress(int variantNumber, EHMutator m, SyntaxTree tree, Options options)
+        static int ApplyStress(int variantNumber, EHMutator m, SyntaxTree tree)
         {
             string shortTitle = $"EH Stress [{variantNumber}]";
             string title = $"// {shortTitle}: {m.Name}";
@@ -185,8 +266,9 @@ namespace MutateTest
             Console.WriteLine("---------------------------------------");
             Console.WriteLine(title);
             SyntaxNode newRoot = m.Mutate(tree.GetRoot());
+            Console.WriteLine($"// {shortTitle}: made {m.TransformCount} mutations");
 
-            if (options.ShowResults)
+            if (Options.ShowResults)
             {
                 Console.WriteLine(newRoot.ToFullString());
             }
@@ -198,7 +280,7 @@ namespace MutateTest
             return stressResult;
         }
 
-        static int CompileAndExecute(SyntaxTree inputTree, string name)
+        static int CompileAndExecute(SyntaxTree tree, string name)
         {
             //Console.WriteLine($"Compiling {name} with assembly references:");
             //foreach (var reference in References)
@@ -206,7 +288,7 @@ namespace MutateTest
             //    Console.WriteLine($"{reference.Display}");
             //}
 
-            SyntaxTree[] inputTrees = { inputTree };
+            SyntaxTree[] inputTrees = { tree };
             CSharpCompilation compilation = CSharpCompilation.Create("InputProgram", inputTrees, References, ReleaseOptions);
 
             using (var ms = new MemoryStream())
@@ -272,18 +354,20 @@ namespace MutateTest
     //   bottom-up rewriting?
     //   apply to all blocks or more blocks
     //   split up statements within a block
-    //   mix stress transforms randomly; iterate on them
     public abstract class EHMutator : CSharpSyntaxRewriter
     {
         public abstract string Name { get; }
+
+        public int TransformCount { get; set; }
 
         protected void Announce(SyntaxNode node)
         {
             if (Options.Verbose)
             {
                 var lineSpan = node.GetLocation().GetMappedLineSpan();
-                Console.WriteLine($"// Adding {Name} around lines {lineSpan.StartLinePosition.Line}-{lineSpan.EndLinePosition.Line}");
+                Console.WriteLine($"// {Name} [{TransformCount}] @ lines {lineSpan.StartLinePosition.Line}-{lineSpan.EndLinePosition.Line}");
             }
+            TransformCount++;
         }
 
         protected static bool IsInTryBlock(SyntaxNode baseNode)
@@ -332,7 +416,7 @@ namespace MutateTest
         }
 
         // More generally, things that can't be in finallys
-        protected static bool ContainsReturnOrThrow(SyntaxNode node)
+        protected static bool InvalidInFinally(SyntaxNode node)
         {
             return node.DescendantNodes(descendIntoTrivia: false).
                 Any(x =>
@@ -340,8 +424,18 @@ namespace MutateTest
                      x.Kind() == SyntaxKind.ThrowStatement);
         }
 
+        // More generally, things that can't be in finallys
+        protected static bool InvalidInCatch(SyntaxNode node)
+        {
+            return node.DescendantNodes(descendIntoTrivia: false).
+                Any(x =>
+                    (x.Kind() == SyntaxKind.ImplicitStackAllocArrayCreationExpression) ||
+                     x.Kind() == SyntaxKind.StackAllocArrayCreationExpression);
+        }
+
         public virtual SyntaxNode Mutate(SyntaxNode node)
         {
+            TransformCount = 0;
             return Visit(node);
         }
     }
@@ -384,7 +478,7 @@ namespace MutateTest
 
         public override SyntaxNode VisitBlock(BlockSyntax node)
         {
-            if (ContainsReturnOrThrow(node)) return base.VisitBlock(node);
+            if (InvalidInFinally(node)) return base.VisitBlock(node);
 
             Announce(node);
 
@@ -403,7 +497,6 @@ namespace MutateTest
     public class WrapBlocksInTryEmptyFinally : EHMutator
     {
         public override string Name => "TryEmptyFinally";
-
 
         public override SyntaxNode VisitBlock(BlockSyntax node)
         {
@@ -427,6 +520,8 @@ namespace MutateTest
 
         public override SyntaxNode VisitBlock(BlockSyntax node)
         {
+            if (InvalidInCatch(node)) return base.VisitBlock(node);
+
             Announce(node);
 
             var newNode = Block(
@@ -466,8 +561,8 @@ namespace MutateTest
     // Apply two mutators in sequence
     public class ComboMutator : EHMutator
     {
-        readonly EHMutator _m1;
-        readonly EHMutator _m2;
+        protected readonly EHMutator _m1;
+        protected readonly EHMutator _m2;
 
         public ComboMutator(EHMutator m1, EHMutator m2)
         {
@@ -475,11 +570,26 @@ namespace MutateTest
             _m2 = m2;
         }
 
-        public override string Name => _m1.Name + " then " + _m2.Name;
+        public override string Name => $"({_m1.Name})+({_m2.Name})";
 
-        public override SyntaxNode Mutate(SyntaxNode node)
+        public override SyntaxNode VisitBlock(BlockSyntax node)
         {
-            return _m2.Mutate(_m1.Mutate(node));
+            SyntaxNode result = _m1.VisitBlock(node);
+            if (result != node)
+            {
+                TransformCount++;
+            }
+
+            if (result is BlockSyntax)
+            {
+                result = _m2.VisitBlock((BlockSyntax)node);
+                if (result != node)
+                {
+                    TransformCount++;
+                }
+            }
+
+            return result;
         }
     }
 
@@ -494,18 +604,134 @@ namespace MutateTest
             _n = n;
         }
 
-        public override string Name => "(" + _m.Name + ") repeated " + _n + " times";
+        public override string Name => $"({_m.Name})x{_n}";
 
         public override SyntaxNode Mutate(SyntaxNode node)
+        {
+            SyntaxNode result = node;
+            TransformCount = 0;
+            _m.TransformCount = 0;
+            result = base.Mutate(result);
+            TransformCount += _m.TransformCount;
+            return result;
+        }
+
+        public override SyntaxNode VisitBlock(BlockSyntax node)
         {
             SyntaxNode result = node;
 
             for (int i = 0; i < _n; i++)
             {
-                result = _m.Mutate(result);
+                if (result is BlockSyntax)
+                {
+                    var newResult = _m.VisitBlock((BlockSyntax)result);
+                    if (newResult != result)
+                    {
+                        TransformCount++;
+                    }
+                    result = newResult;
+                }
+                else
+                {
+                    break;
+                }
             }
 
             return result;
+        }
+    }
+
+    // Randomly apply a mutator
+    public class RandomMutator : EHMutator
+    {
+        readonly EHMutator _m;
+        readonly Random _random;
+        readonly double _p;
+
+        public RandomMutator(EHMutator m, Random r, double p)
+        {
+            _m = m;
+            _random = r;
+            _p = p;
+        }
+
+        public override String Name => $"({_m.Name})|()@{_p:F2}";
+
+        public override SyntaxNode VisitBlock(BlockSyntax node)
+        {
+            double x = _random.NextDouble();
+
+            if (x < _p)
+            {
+                if (Options.Verbose)
+                {
+                    Console.WriteLine($"// {Name}: random choose x={x:F2} < p={_p:F2}");
+                }
+
+                var result = _m.VisitBlock(node);
+
+                if (result != node)
+                {
+                    TransformCount++;
+                }
+
+                return result;
+            }
+            else
+            {
+                if (Options.Verbose)
+                {
+                    Console.WriteLine($"// {Name}: random skip x={x:F2} >= p={_p:F2}");
+                }
+
+                return base.VisitBlock(node);
+            }
+        }
+    }
+
+    // Randomly choose between two mutators
+    public class RandomChoiceMutator : ComboMutator
+    {
+        readonly Random _random;
+        readonly double _p;
+
+        public RandomChoiceMutator(EHMutator m1, EHMutator m2, Random r, double p) : base(m1, m2)
+        {
+            _random = r;
+            _p = p;
+        }
+
+        public override string Name => $"({_m1.Name})|({_m2.Name})@{_p:F2}";
+
+        public override SyntaxNode VisitBlock(BlockSyntax node)
+        {
+            double x = _random.NextDouble();
+            SyntaxNode result = null;
+
+            if (x < _p)
+            {
+                if (Options.Verbose)
+                {
+                    Console.WriteLine($"// {Name}: random choice x={x:F2} < p={_p:F2}: {_m1.Name}");
+                }
+
+                result = _m1.VisitBlock(node);
+            }
+            else
+            {
+                if (Options.Verbose)
+                {
+                    Console.WriteLine($"// {Name}: random choice x={x:F2} >= p={_p:F2}: {_m2.Name}");
+                }
+                result = _m2.VisitBlock(node);
+            }
+
+            if (result != node)
+            {
+                TransformCount++;
+            }
+
+            return node;
         }
     }
 }
