@@ -10,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Threading;
 using System.Xml;
 
 // TODO: 
@@ -33,6 +34,7 @@ namespace MutateTest
         public bool StructStress { get; set; }
         public bool ShowResults { get; set; }
         public bool Recursive { get; set; }
+        public bool Quiet { get; set; }
         public bool Verbose { get; set; }
         public int Seed { get; set; }
 
@@ -46,6 +48,12 @@ namespace MutateTest
 
     class Program
     {
+        static DateTime startTime;
+        static EHMutator[] stressors;
+        static int stressorCount;
+        static int totalVariantCount = 0;
+        static int variantCount = 0;
+
         private static readonly CSharpCompilationOptions DebugOptions =
             new CSharpCompilationOptions(OutputKind.ConsoleApplication, concurrentBuild: false, optimizationLevel: OptimizationLevel.Debug).WithAllowUnsafe(true);
 
@@ -84,6 +92,9 @@ namespace MutateTest
             Option showResultsOption = new Option("--showResults", "print modified programs to stdout", new Argument<bool>());
             rootCommand.AddOption(showResultsOption);
 
+            Option quietOption = new Option("--quiet", "display minimal output: only failures", new Argument<bool>());
+            rootCommand.AddOption(quietOption);
+
             Option verboseOption = new Option("--verbose", "describe each transformation", new Argument<bool>());
             rootCommand.AddOption(verboseOption);
 
@@ -104,86 +115,12 @@ namespace MutateTest
 
         static int InnerMain()
         {
-            if (Options.Recursive)
-            {
-                Console.WriteLine("** Directory Mode **");
+            startTime = DateTime.Now;
 
-                //if (!Directory.Exists(options.InputFile))
-                //{
-                //    Console.WriteLine($"Can't access directory '{options.InputFile}'");
-                //    return -1;
-                //}
-
-                var inputFiles = Directory.EnumerateFiles(Options.InputFile, "*", SearchOption.AllDirectories)
-                                    .Where(s => (s.EndsWith(".cs")));
-
-                int total = 0;
-                int failed = 0;
-                int succeeded = 0;
-
-                foreach (var subInputFile in inputFiles)
-                {
-                    total++;
-
-                    int result = MutateOneTest(subInputFile);
-
-                    if (result == 100)
-                    {
-                        succeeded++;
-                    }
-                    else
-                    {
-                        failed++;
-                    }
-                }
-
-                Console.WriteLine($"Final Results: {total} files, {succeeded} succeeded, {failed} failed");
-
-                if (failed == 0)
-                {
-                    return 100;
-                }
-                else
-                {
-                    return -1;
-                }
-            }
-            else
-            {
-                int result = MutateOneTest(Options.InputFile);
-                return result;
-            }
-        }
-
-        static int MutateOneTest(string testFile)
-        {
-            Console.WriteLine("---------------------------------------");
-            Console.WriteLine("// Original Program");
-
-            // Access input and build parse tree
-            if (!File.Exists(testFile))
-            {
-                Console.WriteLine($"Can't access '{testFile}'");
-                return -1;
-            }
-
-            string inputText = File.ReadAllText(testFile);
-            SyntaxTree inputTree = CSharpSyntaxTree.ParseText(inputText,
-                    path: testFile,
-                    options: ParseOptions);
-
-            int inputResult = CompileAndExecute(inputTree, testFile);
-
-            if (inputResult != 100)
-            {
-                return inputResult;
-            }
-
-            Random random = new Random(Options.Seed);
-
-            // Ok, we have a compile and runnable test case. Now, mess with it....
             if (Options.EhStress)
             {
+                Random random = new Random(Options.Seed);
+
                 // Singleton stressors
                 EHMutator tryCatch = new WrapBlocksInTryCatch();
                 EHMutator tryEmptyFinally = new WrapBlocksInTryEmptyFinally();
@@ -229,7 +166,7 @@ namespace MutateTest
                 EHMutator complex2 = new RepeatMutator(complex1, 2);
                 EHMutator complex3 = new ComboMutator(combo1234x2, combo3412x2);
 
-                EHMutator[] stressors = new EHMutator[] {
+                stressors = new EHMutator[] {
                     tryCatch, tryCatchx2,
                     tryEmptyFinally, tryEmtpyFinallyx2,
                     emptyTryFinally, emptyTryFinallyx2,
@@ -242,31 +179,134 @@ namespace MutateTest
                     complex1, complex2, complex3
                 };
 
+                stressorCount = stressors.Length;
+            }
+
+            if (Options.Recursive)
+            {
+                if (!Options.Quiet)
+                {
+                    Console.WriteLine("** Directory Mode **");
+                }
+
+                //if (!Directory.Exists(options.InputFile))
+                //{
+                //    Console.WriteLine($"Can't access directory '{options.InputFile}'");
+                //    return -1;
+                //}
+
+                var inputFiles = Directory.EnumerateFiles(Options.InputFile, "*", SearchOption.AllDirectories)
+                                    .Where(s => (s.EndsWith(".cs")));
+
+                int totalFileCount = inputFiles.Count();
+                totalVariantCount = totalFileCount * (stressorCount + 1); // +1 to count the baseline run
+                Console.WriteLine($"// File count: {totalFileCount}, stressor count: {stressorCount}, total variant count: {totalVariantCount}");
+
+                int total = 0;
+                int failed = 0;
+                int succeeded = 0;
+
+                foreach (var subInputFile in inputFiles)
+                {
+                    total++;
+
+                    int result = MutateOneTest(subInputFile);
+
+                    if (result == 100)
+                    {
+                        succeeded++;
+                    }
+                    else
+                    {
+                        failed++;
+                    }
+                }
+
+                TimeSpan elapsedTime = DateTime.Now - startTime;
+                Console.WriteLine($"Final Results: {total} files, {variantCount} variants, {succeeded} succeeded files, {failed} failed files, total time: {elapsedTime}, time/test: {elapsedTime.TotalSeconds / variantCount:F2}");
+
+                if (failed == 0)
+                {
+                    return 100;
+                }
+                else
+                {
+                    return -1;
+                }
+            }
+            else
+            {
+                int result = MutateOneTest(Options.InputFile);
+                return result;
+            }
+        }
+
+        static int MutateOneTest(string testFile)
+        {
+            if (!Options.Quiet)
+            {
+                Console.WriteLine("---------------------------------------");
+                Console.WriteLine("// Original Program");
+            }
+
+            // Access input and build parse tree
+            if (!File.Exists(testFile))
+            {
+                Console.WriteLine($"Can't access '{testFile}'");
+                totalVariantCount -= stressorCount; // Don't count this one.
+                return -1;
+            }
+
+            string inputText = File.ReadAllText(testFile);
+            SyntaxTree inputTree = CSharpSyntaxTree.ParseText(inputText,
+                    path: testFile,
+                    options: ParseOptions);
+
+            int inputResult = CompileAndExecute(isBaseline: true, inputTree, testFile);
+
+            if (inputResult != 100)
+            {
+                totalVariantCount -= stressorCount; // Don't count this one.
+                return inputResult;
+            }
+
+            int result = 100; // assume success
+
+            // Ok, we have a compile and runnable test case. Now, mess with it....
+            if (Options.EhStress)
+            {
                 int variantNumber = 0;
 
                 foreach (var stressor in stressors)
                 {
-                    int stressResult = ApplyStress(variantNumber++, stressor, inputTree);
+                    int stressResult = ApplyStress(testFile, variantNumber++, stressorCount, stressor, inputTree);
 
-                    if (stressResult != 100)
+                    if (stressResult != 100 && result != 100)
                     {
-                        return stressResult;
+                        // Only save the first non-success value, but continue running all tests.
+                        result = stressResult;
                     }
                 }
             }
 
-            return 100;
+            return result;
         }
 
-        static int ApplyStress(int variantNumber, EHMutator m, SyntaxTree tree)
+        static int ApplyStress(string testFile, int variantNumber, int availableVariantCount, EHMutator m, SyntaxTree tree)
         {
-            string shortTitle = $"EH Stress [{variantNumber}]";
-            string title = $"// {shortTitle}: {m.Name}";
-            Console.WriteLine();
-            Console.WriteLine("---------------------------------------");
-            Console.WriteLine(title);
+            string shortTitle = $"{testFile}: EH Stress [{variantNumber}/{availableVariantCount}]";
+            if (!Options.Quiet)
+            {
+                string title = $"// {shortTitle}: {m.Name}";
+                Console.WriteLine();
+                Console.WriteLine("---------------------------------------");
+                Console.WriteLine(title);
+            }
             SyntaxNode newRoot = m.Mutate(tree.GetRoot());
-            Console.WriteLine($"// {shortTitle}: made {m.TransformCount} mutations");
+            if (!Options.Quiet)
+            {
+                Console.WriteLine($"// {shortTitle}: made {m.TransformCount} mutations");
+            }
 
             if (Options.ShowResults)
             {
@@ -275,13 +315,15 @@ namespace MutateTest
 
             SyntaxTree newTree = SyntaxTree(newRoot, ParseOptions);
 
-            int stressResult = CompileAndExecute(newTree, shortTitle);
+            int stressResult = CompileAndExecute(isBaseline: false, newTree, shortTitle);
 
             return stressResult;
         }
 
-        static int CompileAndExecute(SyntaxTree tree, string name)
+        static int CompileAndExecute(bool isBaseline, SyntaxTree tree, string name)
         {
+            ++variantCount;
+
             //Console.WriteLine($"Compiling {name} with assembly references:");
             //foreach (var reference in References)
             //{
@@ -314,7 +356,12 @@ namespace MutateTest
                     return -1;
                 }
 
-                Console.WriteLine($"// Compiled '{name}' successfully");
+                if (!Options.Quiet)
+                {
+                    Console.WriteLine($"// Compiled '{name}' successfully");
+                }
+
+                // TODO: redirect/capture stdout
 
                 // Load up the assembly and run the test case.
                 Assembly inputAssembly = Assembly.Load(ms.GetBuffer());
@@ -338,6 +385,12 @@ namespace MutateTest
                 }
 
                 Console.WriteLine($"// Execution of '{name}' succeeded (exitCode {inputResult})");
+
+                TimeSpan elapsedTime = DateTime.Now - startTime;
+                double averageSecondsPerVariant = elapsedTime.TotalSeconds / variantCount;
+                double progress = (double)variantCount / totalVariantCount;
+                DateTime finishTime = DateTime.Now + TimeSpan.FromSeconds(averageSecondsPerVariant * (totalVariantCount - variantCount));
+                Console.WriteLine($"// Total time: {elapsedTime}, seconds/test: {averageSecondsPerVariant:F2}, progress: {variantCount}/{totalVariantCount} ({progress:P}), estimated finish: {finishTime}");
                 return 100;
             }
         }
